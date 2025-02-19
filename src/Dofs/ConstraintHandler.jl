@@ -43,8 +43,8 @@ struct Dirichlet # <: Constraint
     facets::OrderedSet{T} where {T <: Union{Int, FacetIndex, FaceIndex, EdgeIndex, VertexIndex}}
     field_name::Symbol
     components::Vector{Int} # components of the field
-    local_facet_dofs::Vector{Int}
-    local_facet_dofs_offset::Vector{Int}
+    global_dofs_nodal_dbc::Vector{Int} # Only for nodal BCs
+    constrained_nodes::Vector{Int}
 end
 function Dirichlet(field_name::Symbol, facets::AbstractVecOrSet, f::Function, components = nothing)
     return Dirichlet(f, convert_to_orderedset(facets), field_name, __to_components(components), Int[], Int[])
@@ -304,19 +304,20 @@ end
 
 # Dirichlet on (facet|face|edge|vertex)set
 function _add!(ch::ConstraintHandler, dbc::Dirichlet, bcfacets::AbstractVecOrSet{Index}, interpolation::Interpolation, field_dim::Int, offset::Int, bcvalue::BCValues, _) where {Index <: BoundaryIndex}
-    local_facet_dofs, local_facet_dofs_offset =
-        _local_facet_dofs_for_bc(interpolation, field_dim, dbc.components, offset, dirichlet_boundarydof_indices(eltype(bcfacets)))
-    copy!(dbc.local_facet_dofs, local_facet_dofs)
-    copy!(dbc.local_facet_dofs_offset, local_facet_dofs_offset)
 
     # loop over all the faces in the set and add the global dofs to `constrained_dofs`
     constrained_dofs = Int[]
     cc = CellCache(ch.dh, UpdateFlags(; nodes = false, coords = false, dofs = true))
     for (cellidx, facetidx) in bcfacets
         reinit!(cc, cellidx)
-        r = local_facet_dofs_offset[facetidx]:(local_facet_dofs_offset[facetidx + 1] - 1)
-        append!(constrained_dofs, cc.dofs[local_facet_dofs[r]]) # TODO: for-loop over r and simply push! to ch.prescribed_dofs
-        @debug println("adding dofs $(cc.dofs[local_facet_dofs[r]]) to dbc")
+        reinit!(bcvalue, facetidx)
+        @debug i0 = length(constrained_dofs) + 1
+        for location in get_dof_locations(bcvalue)
+            for component in dbc.components
+                push!(constrained_dofs, cc.dofs[get_local_dof(bcvalue, location, component)])
+            end
+        end
+        @debug println("adding dofs $(constrained_dofs[i0:end]) to dbc")
     end
 
     # save it to the ConstraintHandler
@@ -328,6 +329,7 @@ function _add!(ch::ConstraintHandler, dbc::Dirichlet, bcfacets::AbstractVecOrSet
     return ch
 end
 
+# TODO: _local_facet_dofs_for_bc included in BCValues, but not used by periodic bc
 # Calculate which local dof index live on each facet:
 # facet `i` have dofs `local_facet_dofs[local_facet_dofs_offset[i]:local_facet_dofs_offset[i+1]-1]
 function _local_facet_dofs_for_bc(interpolation, field_dim, components, offset, boundaryfunc::F = dirichlet_facetdof_indices) where {F}
@@ -370,25 +372,23 @@ function _add!(ch::ConstraintHandler, dbc::Dirichlet, bcnodes::AbstractVecOrSet{
         end
     end
 
-    constrained_dofs = Int[]
-    sizehint!(constrained_dofs, ncomps * length(bcnodes))
-    sizehint!(dbc.local_facet_dofs, length(bcnodes))
+    sizehint!(dbc.global_dofs_nodal_dbc, ncomps * length(bcnodes))
+    sizehint!(dbc.constrained_nodes, length(bcnodes))
     for node in bcnodes
         if !visited[node]
             # either the node belongs to another field handler or it does not have dofs in the constrained field
             continue
         end
         for i in 1:ncomps
-            push!(constrained_dofs, node_dofs[i, node])
+            push!(dbc.global_dofs_nodal_dbc, node_dofs[i, node])
         end
-        push!(dbc.local_facet_dofs, node) # use this field to store the node idx for each node
+        push!(dbc.constrained_nodes, node)
     end
 
     # save it to the ConstraintHandler
-    copy!(dbc.local_facet_dofs_offset, constrained_dofs) # use this field to store the global dofs
     push!(ch.dbcs, dbc)
     push!(ch.bcvalues, bcvalue)
-    for d in constrained_dofs
+    for d in dbc.global_dofs_nodal_dbc
         add_prescribed_dof!(ch, d, NaN, nothing)
     end
     return ch
@@ -412,7 +412,7 @@ function update!(ch::ConstraintHandler, time::Real = 0.0)
         wrapper_f = hasmethod(dbc.f, Tuple{get_coordinate_type(get_grid(ch.dh)), typeof(time)}) ? dbc.f : (x, _) -> dbc.f(x)
         # Function barrier
         _update!(
-            ch.inhomogeneities, wrapper_f, dbc.facets, dbc.field_name, dbc.local_facet_dofs, dbc.local_facet_dofs_offset,
+            ch.inhomogeneities, wrapper_f, dbc.facets, dbc.constrained_nodes, dbc.global_dofs_nodal_dbc,
             dbc.components, ch.dh, ch.bcvalues[i], ch.dofmapping, ch.dofcoefficients, time
         )
     end
@@ -440,7 +440,7 @@ end
 
 # for facets, vertices, faces and edges
 function _update!(
-        inhomogeneities::Vector{T}, f::Function, boundary_entities::AbstractVecOrSet{<:BoundaryIndex}, field::Symbol, local_facet_dofs::Vector{Int}, local_facet_dofs_offset::Vector{Int},
+        inhomogeneities::Vector{T}, f::Function, boundary_entities::AbstractVecOrSet{<:BoundaryIndex}, _, _,
         components::Vector{Int}, dh::AbstractDofHandler, boundaryvalues::BCValues,
         dofmapping::Dict{Int, Int}, dofcoefficients::Vector{Union{Nothing, DofCoefficients{T}}}, time::Real
     ) where {T}
@@ -448,23 +448,14 @@ function _update!(
     cc = CellCache(dh, UpdateFlags(; nodes = false, coords = true, dofs = true))
     for (cellidx, entityidx) in boundary_entities
         reinit!(cc, cellidx)
-
-        # no need to reinit!, enough to update current_entity since we only need geometric shape functions M
-        boundaryvalues.current_entity = entityidx
-
-        # local dof-range for this facet
-        r = local_facet_dofs_offset[entityidx]:(local_facet_dofs_offset[entityidx + 1] - 1)
-        counter = 1
-        for location in 1:getnquadpoints(boundaryvalues)
+        reinit!(boundaryvalues, entityidx)
+        for location in get_dof_locations(boundaryvalues)
             x = spatial_coordinate(boundaryvalues, location, cc.coords)
             bc_value = f(x, time)
             @assert length(bc_value) == length(components)
 
-            for i in 1:length(components)
-                # find the global dof
-                globaldof = cc.dofs[local_facet_dofs[r[counter]]]
-                counter += 1
-
+            for (i, component) in pairs(components)
+                globaldof = cc.dofs[get_local_dof(boundaryvalues, location, component)]
                 dbc_index = dofmapping[globaldof]
                 # Only DBC dofs are currently update!-able so don't modify inhomogeneities
                 # for affine constraints
@@ -480,7 +471,7 @@ end
 
 # for nodes
 function _update!(
-        inhomogeneities::Vector{T}, f::Function, ::AbstractVecOrSet{Int}, field::Symbol, nodeidxs::Vector{Int}, globaldofs::Vector{Int},
+        inhomogeneities::Vector{T}, f::Function, ::AbstractVecOrSet{Int}, nodeidxs::Vector{Int}, globaldofs::Vector{Int},
         components::Vector{Int}, dh::AbstractDofHandler, facetvalues::BCValues,
         dofmapping::Dict{Int, Int}, dofcoefficients::Vector{Union{Nothing, DofCoefficients{T}}}, time::Real
     ) where {T}
@@ -833,11 +824,9 @@ function add!(ch::ConstraintHandler, dbc::Dirichlet)
         # Fetch information about the field on this SubDofHandler
         field_idx = find_field(sdh, dbc.field_name)
         interpolation = getfieldinterpolation(sdh, field_idx)
-        # Internally we use the devectorized version
+
         n_comp = n_dbc_components(interpolation)
-        if interpolation isa VectorizedInterpolation
-            interpolation = interpolation.ip
-        end
+
         getorder(interpolation) == 0 && error("No dof prescribed for order 0 interpolations")
         # Set up components to prescribe (empty input means prescribe all components)
         components = isempty(dbc.components) ? collect(Int, 1:n_comp) : dbc.components
@@ -851,11 +840,11 @@ function add!(ch::ConstraintHandler, dbc::Dirichlet)
             EntityType = FacetIndex
         end
         CT = getcelltype(sdh) # Same celltype enforced in SubDofHandler constructor
-        bcvalues = BCValues(interpolation, geometric_interpolation(CT), EntityType)
+        bcvalues = BCValues(interpolation, geometric_interpolation(CT), EntityType, field_offset(sdh, field_idx))
         # Recreate the Dirichlet(...) struct with the filtered set and call internal add!
         filtered_dbc = Dirichlet(dbc.field_name, filtered_set, dbc.f, components)
         _add!(
-            ch, filtered_dbc, filtered_dbc.facets, interpolation, n_comp,
+            ch, filtered_dbc, filtered_dbc.facets, get_base_interpolation(interpolation), n_comp,
             field_offset(sdh, field_idx), bcvalues, sdh.cellset,
         )
         dbc_added = true
@@ -1096,10 +1085,6 @@ function _add!(
         # No need to update!(chtmp, t) here since we only care about the dofs
         # TODO: Right? maybe if the user passed f we need to...
         foreach(x -> delete!(dof_map, x), chtmp.prescribed_dofs)
-
-        # Need to reset the internal of this DBC in order to add! it again...
-        resize!(dbc.local_facet_dofs, 0)
-        resize!(dbc.local_facet_dofs_offset, 0)
 
         # Add the Dirichlet for the corners
         add!(ch, dbc)
