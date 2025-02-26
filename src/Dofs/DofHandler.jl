@@ -933,6 +933,9 @@ function evaluate_at_grid_nodes(dh::DofHandler, u::AbstractVector, fieldname::Sy
     return _evaluate_at_grid_nodes(dh, u, fieldname)
 end
 
+function_value_init(::ScalarInterpolation, ::AbstractVector{T}) where {T} = zero(T)
+function_value_init(::VectorInterpolation{vdim}, ::AbstractVector{T}) where {vdim, T <: Number} = zero(Vec{vdim, T})
+
 # Internal method that have the vtk option to allocate the output differently
 function _evaluate_at_grid_nodes(dh::DofHandler{sdim}, u::AbstractVector{T}, fieldname::Symbol, ::Val{vtk} = Val(false)) where {T, vtk, sdim}
     # Make sure the field exists
@@ -940,7 +943,7 @@ function _evaluate_at_grid_nodes(dh::DofHandler{sdim}, u::AbstractVector{T}, fie
     # Figure out the return type (scalar or vector)
     field_idx = find_field(dh, fieldname)
     ip = getfieldinterpolation(dh, field_idx)
-    RT = shape_value_type(ip, T)
+    RT = typeof(function_value_init(ip, u))
     if vtk
         # VTK output of solution field (or L2 projected scalar data)
         n_c = n_components(ip)
