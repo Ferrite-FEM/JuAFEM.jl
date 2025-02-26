@@ -1942,3 +1942,59 @@ function get_direction(::Nedelec{RefTriangle, 2}, j, cell)
     edge = edges(cell)[(j + 1) ÷ 2]
     return ifelse(edge[2] > edge[1], 1, -1)
 end
+
+# RefTetrahedron, 1st order Lagrange
+# https://defelement.org/elements/examples/tetrahedron-nedelec1-lagrange-1.html
+function reference_shape_value(ip::Nedelec{RefTetrahedron, 1}, ξ::Vec{3,T}, i::Int) where {T}
+    x, y, z = ξ
+    nil = zero(T)
+
+    i == 1 && return Vec(1 - y - z, x, x)
+    i == 2 && return Vec(-y, x, nil)
+    i == 3 && return Vec(-y, x + z - 1, -y) # Changed sign, follow Ferrite's sign convention
+    i == 4 && return Vec(z, z, 1 - x - y)
+    i == 5 && return Vec(-z, nil, x)
+    i == 6 && return Vec(nil, -z, y)
+    throw(ArgumentError("no shape function $i for interpolation $ip"))
+end
+
+getnbasefunctions(::Nedelec{RefTetrahedron, 1}) = 6
+edgedof_interior_indices(::Nedelec{RefTetrahedron, 1}) = ((1,), (2,), (3,), (4,), (5,), (6,))
+facedof_indices(::Nedelec{RefTetrahedron, 1}) = ((1, 2, 3), (1, 4, 5), (2, 5, 6), (3, 4, 6))
+adjust_dofs_during_distribution(::Nedelec{RefTetrahedron, 1}) = false
+
+function get_direction(::Nedelec{RefTetrahedron, 1}, j, cell)
+    edge = edges(cell)[j]
+    return ifelse(edge[2] > edge[1], 1, -1)
+end
+
+# RefHexahedron, 1st order Lagrange
+# https://defelement.org/elements/examples/hexahedron-nedelec1-lagrange-1.html
+function reference_shape_value(ip::Nedelec{RefHexahedron, 1}, ξ::Vec{3,T}, i::Int) where {T}
+    x, y, z = ξ
+    nil = zero(T)
+
+    i == 1 && return Vec((y * z - y - z + 1) / 8, nil, nil)
+    i == 2 && return Vec(nil, -(x * z - x + z - 1) / 8, nil)
+    i == 3 && return Vec((y * z - y + z - 1) / 8, nil, nil) # Changed sign, follow Ferrite's sign convention
+    i == 4 && return Vec(nil, -(x * z - x - z + 1) / 8, nil)  # Changed sign, follow Ferrite's sign convention
+    i == 5 && return Vec(-(z * y - z + y - 1) / 8, nil, nil)
+    i == 6 && return Vec(nil, (x * z + x + z + 1) / 8, nil)
+    i == 7 && return Vec(-(y * z + y + z + 1) / 8, nil, nil)  # Changed sign, follow Ferrite's sign convention
+    i == 8 && return Vec(nil, (z * x - z + x - 1) / 8, nil) # Changed sign, follow Ferrite's sign convention
+    i == 9 && return Vec(nil, nil, (x * y - x - y + 1) / 8)
+    i == 10 && return Vec(nil, nil, -(x * y - x + y - 1) / 8)
+    i == 11 && return Vec(nil, nil, (x * y + x + y + 1) / 8)
+    i == 12 && return Vec(nil, nil, -(y * x - y + x - 1) / 8) 
+    throw(ArgumentError("no shape function $i for interpolation $ip"))
+end
+
+getnbasefunctions(::Nedelec{RefHexahedron, 1}) = 12
+edgedof_interior_indices(::Nedelec{RefHexahedron, 1}) = ((1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,))
+facedof_indices(::Nedelec{RefHexahedron, 1}) = ((1, 2, 3, 4), (1, 5, 9, 10), (2, 6, 10, 11), (3, 7, 11, 12), (4, 8, 9, 12), (5, 6, 7, 8))
+adjust_dofs_during_distribution(::Nedelec{RefHexahedron, 1}) = false
+
+function get_direction(::Nedelec{RefHexahedron, 1}, j, cell)
+    edge = edges(cell)[j]
+    return ifelse(edge[2] > edge[1], 1, -1)
+end
